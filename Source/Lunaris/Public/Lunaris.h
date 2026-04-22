@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Lunaris. All Rights Reserved.
 
 #pragma once
 
@@ -8,7 +8,6 @@ class FLunarisModule : public IModuleInterface
 {
 public:
 
-	/** IModuleInterface implementation */
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 };
