@@ -4,79 +4,144 @@
 #include "Network/LunarisHttpClient.h"
 #include "Lunaris.h"
 #include "JsonObjectConverter.h"
-#include "Engine/StreamableManager.h"
 #include "Engine/AssetManager.h"
+#include "Engine/GameInstance.h"
+#include "Engine/World.h"
 
 void ULunarisMissionSubsystem::LoadAndSpawnMission(const FString& MissionId)
 {
-	FLunarisHttpClient::FetchMissionActive(
-		MissionId, 
-		FOnMissionFetchComplete::CreateUObject(this, &ULunarisMissionSubsystem::HandleMissionFetched, MissionId)
-	);
+    if (MissionId.IsEmpty())
+    {
+        UE_LOG(LogLunaris, Error, TEXT("LoadAndSpawnMission called with empty MissionId."));
+        OnMissionFailed.Broadcast(MissionId, TEXT("MissionId is empty."));
+        return;
+    }
+
+    UE_LOG(LogLunaris, Log, TEXT("LoadAndSpawnMission: requesting '%s'"), *MissionId);
+
+    FLunarisHttpClient::FetchMissionActive(
+        MissionId,
+        FOnMissionFetchComplete::CreateUObject(this, &ULunarisMissionSubsystem::HandleMissionFetched, MissionId)
+    );
 }
 
-void ULunarisMissionSubsystem::HandleMissionFetched(bool bSuccess, const FString& JsonString, FString MissionId)
+void ULunarisMissionSubsystem::HandleMissionFetched(bool bSuccess, const FString& JsonStringOrError, FString MissionId)
 {
-	if (!IsValid(this)) return;
+    if (!bSuccess)
+    {
+        OnMissionFailed.Broadcast(MissionId, JsonStringOrError);
+        return;
+    }
 
-	if (!bSuccess)
-	{
-		OnMissionFailed.Broadcast(MissionId, JsonString); 
-		return;
-	}
+    FLunarisMissionData MissionData;
+    const bool bParsed = FJsonObjectConverter::JsonObjectStringToUStruct(JsonStringOrError, &MissionData, 0, 0);
 
-	FLunarisMissionData MissionData;
-	const bool bParsed = FJsonObjectConverter::JsonObjectStringToUStruct(JsonString, &MissionData, 0, 0);
+    if (!bParsed)
+    {
+        UE_LOG(LogLunaris, Error, TEXT("Failed to parse mission JSON for '%s'. Raw: %s"), *MissionId, *JsonStringOrError);
+        OnMissionFailed.Broadcast(MissionId, TEXT("Failed to parse mission JSON."));
+        return;
+    }
 
-	if (!bParsed)
-	{
-		UE_LOG(LogLunaris, Error, TEXT("Failed to parse mission JSON. Raw: %s"), *JsonString);
-		OnMissionFailed.Broadcast(MissionId, TEXT("Failed to parse mission JSON"));
-		return;
-	}
+    if (MissionData.TargetActor.ClassPath.IsEmpty())
+    {
+        OnMissionFailed.Broadcast(MissionId, TEXT("TargetActor.ClassPath is empty."));
+        return;
+    }
 
-	UE_LOG(LogLunaris, Log, TEXT("Mission '%s' received. Async-loading actor..."), *MissionData.MissionId);
+    UE_LOG(LogLunaris, Log, TEXT("Mission '%s' received. Async-loading class '%s'..."),
+        *MissionData.MissionId, *MissionData.TargetActor.ClassPath);
 
-	const FSoftClassPath SoftPath(MissionData.TargetActor.ClassPath);
-	UAssetManager::GetStreamableManager().RequestAsyncLoad(
-		SoftPath,
-		FStreamableDelegate::CreateUObject(this, &ULunarisMissionSubsystem::OnTargetLoaded, MissionData)
-	);
+    const FSoftObjectPath SoftPath(MissionData.TargetActor.ClassPath);
+
+    TSharedPtr<FStreamableHandle> Handle = UAssetManager::GetStreamableManager().RequestAsyncLoad(
+        SoftPath,
+        FStreamableDelegate(),
+        FStreamableManager::AsyncLoadHighPriority
+    );
+
+    if (!Handle.IsValid())
+    {
+        OnTargetClassLoaded(MissionData, nullptr);
+        return;
+    }
+
+    InFlightLoads.Add(MissionId, Handle);
+
+    TWeakObjectPtr<ULunarisMissionSubsystem> WeakThis(this);
+    Handle->BindCompleteDelegate(FStreamableDelegate::CreateLambda(
+        [WeakThis, MissionData, Handle]()
+        {
+            if (ULunarisMissionSubsystem* StrongThis = WeakThis.Get())
+            {
+                StrongThis->OnTargetClassLoaded(MissionData, Handle);
+            }
+        }
+    ));
 }
 
-void ULunarisMissionSubsystem::OnTargetLoaded(FLunarisMissionData MissionData)
+void ULunarisMissionSubsystem::OnTargetClassLoaded(FLunarisMissionData MissionData, TSharedPtr<FStreamableHandle> Handle)
 {
-	if (!IsValid(this)) return;
+    InFlightLoads.Remove(MissionData.MissionId);
 
-	UGameInstance* GI = GetGameInstance();
-	if (!IsValid(GI)) return;
+    UClass* LoadedClass = nullptr;
 
-	UWorld* World = GI->GetWorld();
-	if (!IsValid(World)) return;
+    if (Handle.IsValid())
+    {
+        LoadedClass = Cast<UClass>(Handle->GetLoadedAsset());
+    }
 
-	const TSoftClassPtr<AActor> SoftClass(MissionData.TargetActor.ClassPath);
-	UClass* LoadedClass = SoftClass.Get();
-	if (!LoadedClass)
-	{
-		UE_LOG(LogLunaris, Error, TEXT("OnTargetLoaded: Failed to resolve class '%s'."), *MissionData.TargetActor.ClassPath);
-		return;
-	}
+    if (!LoadedClass)
+    {
+        const FSoftObjectPath SoftPath(MissionData.TargetActor.ClassPath);
+        LoadedClass = Cast<UClass>(SoftPath.ResolveObject());
+    }
 
-	if (!LoadedClass->IsChildOf(AActor::StaticClass()))
-	{
-		UE_LOG(LogLunaris, Error, TEXT("OnTargetLoaded: Class '%s' is not an AActor subclass."), *MissionData.TargetActor.ClassPath);
-		return;
-	}
+    if (!LoadedClass)
+    {
+        UE_LOG(LogLunaris, Error, TEXT("OnTargetClassLoaded: failed to resolve UClass for '%s'."), *MissionData.TargetActor.ClassPath);
+        OnMissionFailed.Broadcast(MissionData.MissionId, FString::Printf(TEXT("Failed to resolve class '%s'."), *MissionData.TargetActor.ClassPath));
+        return;
+    }
 
-	AActor* SpawnedActor = World->SpawnActor<AActor>(LoadedClass, MissionData.TargetActor.SpawnLocation, FRotator::ZeroRotator);
-	if (SpawnedActor)
-	{
-		UE_LOG(LogLunaris, Log, TEXT("Actor '%s' spawned for mission '%s'."), *LoadedClass->GetName(), *MissionData.MissionId);
-		OnMissionSpawned.Broadcast(MissionData.MissionId, SpawnedActor);
-	}
-	else
-	{
-		UE_LOG(LogLunaris, Warning, TEXT("SpawnActor returned null for mission '%s'."), *MissionData.MissionId);
-		OnMissionFailed.Broadcast(MissionData.MissionId, TEXT("SpawnActor returned null"));
-	}
+    if (!LoadedClass->IsChildOf(AActor::StaticClass()))
+    {
+        UE_LOG(LogLunaris, Error, TEXT("OnTargetClassLoaded: class '%s' is not an AActor subclass."), *MissionData.TargetActor.ClassPath);
+        OnMissionFailed.Broadcast(MissionData.MissionId, FString::Printf(TEXT("Class '%s' is not an AActor."), *MissionData.TargetActor.ClassPath));
+        return;
+    }
+
+    UGameInstance* GI = GetGameInstance();
+    UWorld* World = GI ? GI->GetWorld() : nullptr;
+    if (!IsValid(World))
+    {
+        OnMissionFailed.Broadcast(MissionData.MissionId, TEXT("No valid UWorld to spawn into."));
+        return;
+    }
+
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+
+    AActor* SpawnedActor = World->SpawnActor<AActor>(
+        LoadedClass,
+        MissionData.TargetActor.SpawnLocation,
+        FRotator::ZeroRotator,
+        SpawnParams
+    );
+
+    if (SpawnedActor)
+    {
+        UE_LOG(LogLunaris, Log, TEXT("Spawned '%s' for mission '%s' at (%.0f, %.0f, %.0f)."),
+            *LoadedClass->GetName(),
+            *MissionData.MissionId,
+            MissionData.TargetActor.SpawnLocation.X,
+            MissionData.TargetActor.SpawnLocation.Y,
+            MissionData.TargetActor.SpawnLocation.Z);
+        OnMissionSpawned.Broadcast(MissionData.MissionId, SpawnedActor);
+    }
+    else
+    {
+        UE_LOG(LogLunaris, Warning, TEXT("SpawnActor returned null for mission '%s'."), *MissionData.MissionId);
+        OnMissionFailed.Broadcast(MissionData.MissionId, TEXT("SpawnActor returned null."));
+    }
 }

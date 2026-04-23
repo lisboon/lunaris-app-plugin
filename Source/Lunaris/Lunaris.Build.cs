@@ -38,6 +38,7 @@ public class Lunaris : ModuleRules
 			{
 				"CoreUObject",
 				"Engine",
+				"DeveloperSettings",
 				"Slate",
 				"SlateCore",
 				// ... add private dependencies that you statically link with here ...	
