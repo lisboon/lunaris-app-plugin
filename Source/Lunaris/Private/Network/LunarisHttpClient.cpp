@@ -2,11 +2,21 @@
 
 #include "Network/LunarisHttpClient.h"
 #include "Core/LunarisSettings.h"
-#include "Lunaris.h" 
+#include "Lunaris.h"
 #include "HttpModule.h"
 #include "Interfaces/IHttpResponse.h"
 
 void FLunarisHttpClient::FetchMissionActive(const FString& MissionId, FOnMissionFetchComplete OnCompleteDelegate)
+{
+	DispatchEngineRequest(MissionId, TEXT("active"), OnCompleteDelegate);
+}
+
+void FLunarisHttpClient::FetchMissionActiveHash(const FString& MissionId, FOnMissionHashFetchComplete OnCompleteDelegate)
+{
+	DispatchEngineRequest(MissionId, TEXT("active/hash"), OnCompleteDelegate);
+}
+
+void FLunarisHttpClient::DispatchEngineRequest(const FString& MissionId, const TCHAR* UrlSuffix, FOnMissionFetchComplete OnCompleteDelegate)
 {
 	if (MissionId.IsEmpty())
 	{
@@ -23,7 +33,7 @@ void FLunarisHttpClient::FetchMissionActive(const FString& MissionId, FOnMission
 		return;
 	}
 
-	const FString Url = FString::Printf(TEXT("%s/missions/engine/%s/active"), *Settings->BackendUrl, *MissionId);
+	const FString Url = FString::Printf(TEXT("%s/missions/engine/%s/%s"), *Settings->BackendUrl, *MissionId, UrlSuffix);
 
 	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
 	Request->SetURL(Url);
