@@ -53,10 +53,27 @@ void ULunarisMissionSubsystem::HandleMissionFetched(bool bSuccess, const FString
         *MissionData.MissionId, *MissionData.TargetActor.ClassPath);
 
     const FSoftObjectPath SoftPath(MissionData.TargetActor.ClassPath);
+    const FString LoadKey = MissionData.MissionId;
+
+    TWeakObjectPtr<ULunarisMissionSubsystem> WeakThis(this);
+    FStreamableDelegate OnLoaded = FStreamableDelegate::CreateLambda(
+        [WeakThis, MissionData, LoadKey]()
+        {
+            if (ULunarisMissionSubsystem* StrongThis = WeakThis.Get())
+            {
+                TSharedPtr<FStreamableHandle> Handle;
+                if (TSharedPtr<FStreamableHandle>* Found = StrongThis->InFlightLoads.Find(LoadKey))
+                {
+                    Handle = *Found;
+                }
+                StrongThis->OnTargetClassLoaded(MissionData, Handle);
+            }
+        }
+    );
 
     TSharedPtr<FStreamableHandle> Handle = UAssetManager::GetStreamableManager().RequestAsyncLoad(
         SoftPath,
-        FStreamableDelegate(),
+        OnLoaded,
         FStreamableManager::AsyncLoadHighPriority
     );
 
@@ -66,18 +83,7 @@ void ULunarisMissionSubsystem::HandleMissionFetched(bool bSuccess, const FString
         return;
     }
 
-    InFlightLoads.Add(MissionId, Handle);
-
-    TWeakObjectPtr<ULunarisMissionSubsystem> WeakThis(this);
-    Handle->BindCompleteDelegate(FStreamableDelegate::CreateLambda(
-        [WeakThis, MissionData, Handle]()
-        {
-            if (ULunarisMissionSubsystem* StrongThis = WeakThis.Get())
-            {
-                StrongThis->OnTargetClassLoaded(MissionData, Handle);
-            }
-        }
-    ));
+    InFlightLoads.Add(LoadKey, Handle);
 }
 
 void ULunarisMissionSubsystem::OnTargetClassLoaded(FLunarisMissionData MissionData, TSharedPtr<FStreamableHandle> Handle)
