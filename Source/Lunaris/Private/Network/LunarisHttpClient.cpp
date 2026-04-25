@@ -65,6 +65,5 @@ void FLunarisHttpClient::OnHttpResponseReceived(FHttpRequestPtr Request, FHttpRe
 		return;
 	}
 
-	// Sucesso! Retornamos o JSON limpo para quem pediu.
 	OnCompleteDelegate.ExecuteIfBound(true, Response->GetContentAsString());
 }
